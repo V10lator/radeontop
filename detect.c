@@ -24,6 +24,67 @@ unsigned long long gttsize;
 int drm_fd = -1;
 char drm_name[10] = ""; // should be radeon or amdgpu
 
+static int drmfilter(const struct dirent *ent) {
+
+	if (ent->d_name[0] == '.')
+		return 0;
+	if (strncmp(ent->d_name, "card", 4))
+		return 0;
+
+	return 1;
+}
+
+static void finddrm(const unsigned char bus) {
+
+	int fd, i;
+	struct dirent **namelist;
+	const int entries = scandir("/dev/dri", &namelist, drmfilter, alphasort);
+	char tmp[160];
+
+	if (entries < 0) {
+		perror("scandir");
+		return;
+	}
+
+	for (i = 0; i < entries; i++) {
+		snprintf(tmp, 160, "/dev/dri/%s", namelist[i]->d_name);
+
+		fd = open(tmp, O_RDWR);
+		if (fd < 0) continue;
+
+		const char *busid = drmGetBusid(fd);
+
+		if (strncmp(busid, "pci:", 4))
+			goto fail;
+
+		busid = strchr(busid, ':');
+		if (!busid) goto fail;
+		busid++;
+
+		busid = strchr(busid, ':');
+		if (!busid) goto fail;
+		busid++;
+
+		unsigned parsed;
+		if (sscanf(busid, "%x", &parsed) != 1)
+			goto fail;
+
+		if (parsed == bus) {
+			drm_fd = fd;
+			break;
+		}
+
+		fail:
+		close(fd);
+	}
+
+	for (i = 0; i < entries; i++) {
+		free(namelist[i]);
+	}
+
+	free(namelist);
+}
+
 unsigned int init_pci(unsigned char bus, const unsigned char forcemem) {
 
 	int ret = pci_system_init();
@@ -82,6 +143,12 @@ unsigned int init_pci(unsigned char bus, const unsigned char forcemem) {
 	}
 	if (drm_fd < 0 && access("/dev/ati/card0", F_OK) == 0) // fglrx path
 		drm_fd = open("/dev/ati/card0", O_RDWR);
+	if (drm_fd < 0) { // Neither the new libdrm nor the fglrx path worked. Fall back to old libdrm method-
+		if (bus)
+			finddrm(bus);
+		else if (access("/dev/dri/card0", F_OK) == 0)
+			drm_fd = open("/dev/dri/card0", O_RDWR);
+	}
 
 	use_ioctl = 0;
 	if (drm_fd >= 0) {
